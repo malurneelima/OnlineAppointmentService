@@ -14,6 +14,8 @@ import com.onlineappointment.appointment.entity.Appointment;
 import com.onlineappointment.appointment.entity.Availability;
 import com.onlineappointment.appointment.repository.AppointmentRepository;
 
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
+
 @Service
 public class AppointmentService {
 
@@ -28,7 +30,8 @@ public class AppointmentService {
     public AppointmentService(RestTemplate restTemplate) {
         this.restTemplate = restTemplate;
     }
-
+    
+    @CircuitBreaker(name="createAppointmentExt" , fallbackMethod = "createAppointmentFallback")
     public Appointment createAppointment(Appointment appointment) {
     	 // Check doctor availability before saving the appointment
         boolean isAvailable = checkDoctorAvailability(appointment.getDoctor().getId(), appointment.getAppointmentDate());
@@ -40,6 +43,12 @@ public class AppointmentService {
             throw new RuntimeException("Doctor is not available at the requested time.");
         } 
     }
+    //Fallback
+    public Appointment createAppointmentFallback(Appointment appointment,Throwable throwable) {
+   	 System.out.println("Fallback method triggered for createAppointment as :"+throwable.getMessage());
+   	 throw new RuntimeException("Doctor service must be down");
+       
+   }
     
     private boolean checkDoctorAvailability(Long doctorId, LocalDateTime appointmentDate) {
         String urlData = url + doctorId ;
