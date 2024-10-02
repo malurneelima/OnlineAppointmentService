@@ -1,9 +1,9 @@
 package com.onlineappointment.appointment.service;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Optional;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -12,6 +12,9 @@ import org.springframework.web.client.RestTemplate;
 
 import com.onlineappointment.appointment.entity.Appointment;
 import com.onlineappointment.appointment.entity.Availability;
+import com.onlineappointment.appointment.exception.AppointmentException;
+import com.onlineappointment.appointment.exception.ResourceNotFoundException;
+import com.onlineappointment.appointment.exception.ServiceUnavailableException;
 import com.onlineappointment.appointment.repository.AppointmentRepository;
 
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
@@ -33,71 +36,90 @@ public class AppointmentService {
     
     @CircuitBreaker(name="createAppointmentExt" , fallbackMethod = "createAppointmentFallback")
     public Appointment createAppointment(Appointment appointment) {
-    	 // Check doctor availability before saving the appointment
-        boolean isAvailable = checkDoctorAvailability(appointment.getDoctor().getId(), appointment.getAppointmentDate());
-        
-        if (isAvailable) {
-            // Save the appointment if doctor is available
-            return appointmentRepository.save(appointment);
-        } else {
-            throw new RuntimeException("Doctor is not available at the requested time.");
-        } 
+        boolean data=checkDoctorAvailability(appointment.getDoctor().getId(), appointment.getAppointmentDate());
+        if(data) {
+        	return appointmentRepository.save(appointment);
+        }
+        return null;
+      
+     
     }
-    //Fallback
+
     public Appointment createAppointmentFallback(Appointment appointment,Throwable throwable) {
    	 System.out.println("Fallback method triggered for createAppointment as :"+throwable.getMessage());
-   	 throw new RuntimeException("Doctor service must be down");
+   	 throw new ServiceUnavailableException("Doctor service is down, please try again later.");
        
    }
     
     private boolean checkDoctorAvailability(Long doctorId, LocalDateTime appointmentDate) {
         String urlData = url + doctorId ;
-        
-        // Making a GET request to Doctor Service to get availability
-        List<LinkedHashMap<String, Object>> availableSlots= restTemplate.getForObject(urlData, List.class);
-        
-        if (availableSlots != null) { 
-        	return availableSlots != null && availableSlots.stream()
-                .map(slot -> {
-                    LocalDateTime startTime = LocalDateTime.parse((String) slot.get("startTime"));
-                    LocalDateTime endTime = LocalDateTime.parse((String) slot.get("endTime"));
-                    Availability availability = new Availability();
-                    availability.setStartTime(startTime);
-                    availability.setEndTime(endTime);
-                    return availability;
-                })
-                .anyMatch(app -> app.isAvailable(appointmentDate));
-        	} 
-        else {
-            System.out.println("No available slots found.");
+        List<LinkedHashMap<String, Object>> availableSlots;
+        try {
+            availableSlots = restTemplate.getForObject(urlData, List.class);
+        } catch (Exception e) {
+            System.out.println("Error fetching availability: " + e.getMessage());
+            throw new ServiceUnavailableException("Doctor service is temporarily unavailable. Please try again later.");
         }
-     
+
+        if (availableSlots == null || availableSlots.isEmpty()) {
+            return false;
+        }
+
+        for (LinkedHashMap<String, Object> slot : availableSlots) {
+            String startTimeString = (String) slot.get("startTime");
+            String endTimeString = (String) slot.get("endTime");
+
+            LocalDateTime startTime = LocalDateTime.parse(startTimeString);
+            LocalDateTime endTime = LocalDateTime.parse(endTimeString);
+
+            Availability availability = new Availability();
+            availability.setStartTime(startTime);
+            availability.setEndTime(endTime);
+
+            // Check if the appointment date falls within the available time slot
+            if (availability.isAvailable(appointmentDate, startTime, endTime)) {
+                return true; // Doctor is available, continue with the process
+            }
+        }
 		return false;
+
+      
     }
 
+    @CircuitBreaker(name="updateAppointmentdb", fallbackMethod = "updateAppointmentFallback")
     public Appointment updateAppointment(Long id, Appointment newAppointmentDetails) {
-        Optional<Appointment> appointmentOptional = appointmentRepository.findById(id);
-        if (appointmentOptional.isPresent()) {
-            Appointment appointment = appointmentOptional.get();
-            appointment.setAppointmentDate(newAppointmentDetails.getAppointmentDate());
-            appointment.setStartTime(newAppointmentDetails.getStartTime());
-            appointment.setEndTime(newAppointmentDetails.getEndTime());
-            appointment.setDoctor(newAppointmentDetails.getDoctor());
-            return appointmentRepository.save(appointment);
-        }
-        return null; // Handle error cases
+        Appointment appointmentOptional = appointmentRepository.findById(id).orElseThrow(()->new ResourceNotFoundException("updateAppointment", "user", id));
+            appointmentOptional.setAppointmentDate(newAppointmentDetails.getAppointmentDate());
+            appointmentOptional.setStartTime(newAppointmentDetails.getStartTime());
+            appointmentOptional.setEndTime(newAppointmentDetails.getEndTime());
+            appointmentOptional.setDoctor(newAppointmentDetails.getDoctor());
+            return appointmentRepository.save(appointmentOptional);
+    }
+    public Appointment updateAppointmentFallback(Long id, Appointment newAppointmentDetails,Throwable throwable) {
+        System.out.println("Fallback triggered by updateAppointment due to "+throwable.getMessage());
+        throw new AppointmentException("User id for update Appointment"); // Handle error cases
     }
 
+   // @CircuitBreaker(name="cancelAppointmentdb" , fallbackMethod = "cancelAppointmentFallback")
     public boolean cancelAppointment(Long id) {
-        if (appointmentRepository.existsById(id)) {
+    	appointmentRepository.findById(id).orElseThrow(()->new ResourceNotFoundException("Cancel Appointment", "user id", id));
+    	 
             appointmentRepository.deleteById(id);
             return true;
-        }
-        return false;
+    }
+    public boolean cancelAppointmentFallback(Long id,Throwable throwable) {
+    	System.out.println("Fallback method triggered for getAllAppointments as :"+throwable.getMessage());
+    	return false;
     }
 
+    @CircuitBreaker(name="getAllAppointmentsdb", fallbackMethod = "getAllAppointmentsFallback")
     public List<Appointment> getAllAppointments() {
         return appointmentRepository.findAll();
+    }
+    
+    public List<Appointment> getAllAppointmentsFallback(Throwable throwable) {
+    	System.out.println("Fallback method triggered for getAllAppointments as :"+throwable.getMessage());
+        return new ArrayList<>();
     }
 }
 
